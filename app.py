@@ -135,10 +135,11 @@ st.markdown("""
 SPECTRUM_ID    = "1R8xFvAAzRR_QT1wfGlnP8QRkrHVFue6Q"
 SPECTROGRAM_ID = "1QVqIyrEUOsMO8rGzo6K4f2aO1YhvjzyU"
 
-# Local paths to save downloaded models
-MODEL_DIR      = "/tmp"
-SPEC_PATH      = os.path.join(MODEL_DIR, "best_spectrum_model.h5")
-SPECTRO_PATH   = os.path.join(MODEL_DIR, "best_spectrogram_model.h5")
+# Models are downloaded here at first start
+MODEL_DIR    = "/tmp"
+SPEC_PATH    = os.path.join(MODEL_DIR, "best_spectrum_model.h5")
+SPECTRO_PATH = os.path.join(MODEL_DIR, "best_spectrogram_model.h5")
+MIN_MODEL_BYTES = 1_000_000   # a real model is ~27 MB; smaller = bad download
 
 CLASS_LABELS = ['Ball', 'Inner_Race', 'Normal', 'Outer_Race']
 
@@ -191,7 +192,7 @@ def validate_image_size(img):
 def validate_image_content(img, img_type):
     img_rgb = img.convert('RGB').resize((224, 224))
     arr     = np.array(img_rgb, dtype=np.float32)
-    r, g, b = arr[:,:,0], arr[:,:,1], arr[:,:,2]
+    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
     total   = 224 * 224
 
     white_ratio = np.sum((r > 220) & (g > 220) & (b > 220)) / total
@@ -241,33 +242,31 @@ def detect_ood(scores):
         return True
     return False
 
-# ── Download model from Google Drive ─────────────────────────
-def download_model(file_id, output_path):
-    url = f"https://drive.google.com/uc?id={file_id}"
-    gdown.download(url, output_path, quiet=False)
+def download_model(file_id, output_path, label):
+    """Download a model from Google Drive if not already present."""
+    if os.path.exists(output_path) and os.path.getsize(output_path) > MIN_MODEL_BYTES:
+        return
+    with st.spinner(f"Downloading {label} model from Google Drive..."):
+        url = f"https://drive.google.com/uc?id={file_id}"
+        gdown.download(url, output_path, quiet=True)
+
+    # Verify the download is a real model, not an HTML error page
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < MIN_MODEL_BYTES:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        st.error(
+            f"❌ Failed to download the {label} model. "
+            f"Check that the Google Drive file is shared as 'Anyone with the link'."
+        )
+        st.stop()
 
 @st.cache_resource
 def load_models():
-    # Download spectrum model if not exists
-    if not os.path.exists(SPEC_PATH):
-        with st.spinner("Downloading Spectrum model from Google Drive..."):
-            download_model(SPECTRUM_ID, SPEC_PATH)
+    download_model(SPECTRUM_ID,    SPEC_PATH,    "Spectrum")
+    download_model(SPECTROGRAM_ID, SPECTRO_PATH, "Spectrogram")
 
-    # Download spectrogram model if not exists
-    if not os.path.exists(SPECTRO_PATH):
-        with st.spinner("Downloading Spectrogram model from Google Drive..."):
-            download_model(SPECTROGRAM_ID, SPECTRO_PATH)
-
-    # Verify downloads
-    if not os.path.exists(SPEC_PATH):
-        st.error("❌ Failed to download Spectrum model.")
-        st.stop()
-    if not os.path.exists(SPECTRO_PATH):
-        st.error("❌ Failed to download Spectrogram model.")
-        st.stop()
-
-    spectrum_model    = tf.keras.models.load_model(SPEC_PATH)
-    spectrogram_model = tf.keras.models.load_model(SPECTRO_PATH)
+    spectrum_model    = tf.keras.models.load_model(SPEC_PATH,    compile=False)
+    spectrogram_model = tf.keras.models.load_model(SPECTRO_PATH, compile=False)
     return spectrum_model, spectrogram_model
 
 def predict(model, img):
@@ -307,7 +306,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Load models (auto download from Google Drive)
+# Load models (auto-download from Google Drive on first start)
 spectrum_model, spectrogram_model = load_models()
 
 st.markdown(
@@ -332,7 +331,7 @@ uploaded = st.file_uploader(
 
 if uploaded:
     img = Image.open(uploaded)
-    st.image(img, caption="Uploaded Image", use_column_width=True)
+    st.image(img, caption="Uploaded Image", use_container_width=True)
 
     # Step 1 — size check
     valid_size, size_msg = validate_image_size(img)
@@ -357,11 +356,16 @@ if uploaded:
     if st.button("🔍 ANALYZE BEARING"):
         with st.spinner("Analyzing..."):
             time.sleep(0.5)
-            model      = spectrum_model      if "Spectrum" in img_type else spectrogram_model
-            model_name = "Spectrum Model (FFT)" if "Spectrum" in img_type else "Spectrogram Model (STFT)"
+            if "Spectrum" in img_type:
+                model      = spectrum_model
+                model_name = "Spectrum Model (FFT)"
+            else:
+                model      = spectrogram_model
+                model_name = "Spectrogram Model (STFT)"
             pred_class, confidence, scores = predict(model, img)
             is_ood = detect_ood(scores)
 
+        # Step 3 — confidence-based OOD check
         if is_ood:
             st.markdown("""
             <div class="warning-box">
@@ -383,7 +387,7 @@ if uploaded:
         st.markdown("### 📊 DIAGNOSIS RESULT")
         st.markdown(f"""
         <div class="result-box {color}">
-            <div class="fault-label">{pred_class.replace('_',' ').upper()}</div>
+            <div class="fault-label">{pred_class.replace('_', ' ').upper()}</div>
             <div style="margin-top:1rem">
                 <div class="metric-row">
                     <span class="metric-label">MODEL USED</span>
