@@ -4,3 +4,5 @@ keras==3.14.0
 Pillow
 plotly
 gdown
+scipy
+matplotlib
