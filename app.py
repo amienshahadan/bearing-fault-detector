@@ -136,18 +136,37 @@ def read_table(raw_bytes):
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
     return df.reset_index(drop=True)
 
+def _walk_mat(obj, path, out, depth=0):
+    """Collect numeric arrays from (nested) MATLAB structs and cell arrays."""
+    if depth > 6 or len(out) >= 60:
+        return
+    if isinstance(obj, sio.matlab.mat_struct):
+        fields = list(obj._fieldnames)
+        # a channel record: struct with Name + Data (e.g. Paderborn 'vibration_1')
+        if "Name" in fields and "Data" in fields:
+            data = np.asarray(obj.Data)
+            if np.issubdtype(data.dtype, np.number) and data.size >= CHUNK:
+                out[f"{path} › {obj.Name}"] = data
+            return
+        for f in fields:
+            _walk_mat(getattr(obj, f), f"{path}.{f}", out, depth + 1)
+    elif isinstance(obj, np.ndarray):
+        if obj.dtype == object:
+            for i, item in enumerate(obj.flat):
+                _walk_mat(item, f"{path}[{i}]", out, depth + 1)
+        elif np.issubdtype(obj.dtype, np.number) and obj.size >= CHUNK:
+            out[path] = obj
+
 def read_mat(raw_bytes):
-    """Return {variable: 1-D array} for numeric variables long enough."""
-    mat  = sio.loadmat(io.BytesIO(raw_bytes))
-    cand = {}
+    """Return {label: array} for numeric signals long enough, incl. nested structs."""
+    mat = sio.loadmat(io.BytesIO(raw_bytes), struct_as_record=False,
+                      squeeze_me=True)
+    out = {}
     for k, v in mat.items():
-        if k.startswith("__") or not isinstance(v, np.ndarray):
+        if k.startswith("__"):
             continue
-        if not np.issubdtype(v.dtype, np.number):
-            continue
-        if v.size >= CHUNK:
-            cand[k] = v
-    return cand
+        _walk_mat(v, k, out)
+    return out
 
 def validate_signal(x):
     x = np.asarray(x, dtype=np.float64).flatten()
@@ -421,18 +440,25 @@ def tab_raw_signal(spectrum_model, spectrogram_model):
         return
 
     # ── read file and pick the signal column / variable ──────
-    name = up.name.lower()
+    name       = up.name.lower()
+    default_fs = float(FS_MODEL)
     try:
         if name.endswith(".mat"):
             cand = read_mat(up.getvalue())
             if not cand:
                 warn("NO SIGNAL FOUND",
-                     f"No numeric variable with at least {CHUNK} samples in this .mat file.")
+                     f"No numeric signal with at least {CHUNK} samples in this .mat file.")
                 return
             keys    = list(cand.keys())
-            default = next((i for i, k in enumerate(keys) if "DE_time" in k), 0)
-            var     = st.selectbox("Variable to analyse", keys, index=default)
+            default = next((i for i, k in enumerate(keys) if "DE_time" in k),
+                      next((i for i, k in enumerate(keys) if "vibration" in k.lower()), 0))
+            var     = st.selectbox("Signal to analyse", keys, index=default)
             raw     = cand[var]
+            if "vibration" in var.lower():
+                default_fs = 64000.0
+                st.caption("Paderborn 'vibration' channel is sampled at 64 kHz — "
+                           "sampling rate below was set to 64000 Hz for you. "
+                           "Change it if your file is different.")
         else:
             df = read_table(up.getvalue())
             if df.shape[1] == 0:
@@ -456,7 +482,7 @@ def tab_raw_signal(spectrum_model, spectrogram_model):
     with c1:
         fs_in = st.number_input("Sampling rate of your signal (Hz)",
                                 min_value=100.0, max_value=200000.0,
-                                value=float(FS_MODEL), step=100.0)
+                                value=default_fs, step=100.0)
     with c2:
         max_chunks = st.slider("Max chunks to analyse", 5, 200, 50, step=5,
                                help=f"Each chunk = {CHUNK} samples at {FS_MODEL} Hz. "
